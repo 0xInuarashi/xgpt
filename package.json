@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
-  "type": "module",
   "license": "AGPL-version-3.0",
   "private": false,
   "engines": {
@@ -25,12 +24,18 @@
   "contributors": [],
   "scripts": {
     "dev": "",
-    "test": ""
+    "test": "",
+    "build": "npx esbuild index.js --bundle --platform=node --format=cjs --outfile=dist/bundle.js && npx pkg dist/bundle.js --targets latest-linux-x64 --output dist/xgpt"
   },
   "dependencies": {
+    "axios": "^1.7.9",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
     "marked": "^14.1.4",
     "marked-terminal": "^7.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.2",
+    "pkg": "^5.8.1"
   }
 }

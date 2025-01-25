@@ -1,51 +1,54 @@
 #!/usr/bin/env node
 
 //
-// cgpt.mjs
-// Node.js CLI to chat with GPT, with two modes:
-//   1) Normal (streaming, no Markdown, no spinner)
-//   2) Markdown (non-streaming, spinner animation, prints entire response at once)
+// xgpt.js
+// A Node.js CLI to chat with GPT, packaged via "pkg" into a single binary.
+// Reads config from ~/.config/xgpt/xgpt.env if present.
 //
-// Commands:
-//   /ns      -> start a new (blank) session in normal mode
-//   /ns <m>  -> start new normal session with an initial message
-//   /nsm     -> start a new (blank) session in markdown mode
-//   /nsm <m> -> start new markdown session with an initial message
-//   /quit    -> exit
+// Features:
+//   - Normal mode: streams tokens in real time (with axios + streaming)
+//   - Markdown mode: spinner + prints entire response as Markdown
+//   - Commands: /ns, /nsm, /quit
+//   - CLI options: --apikey, --markdown
+//   - After building with "pkg", place the binary in /usr/local/bin or similar.
 //
-// Command-line option:
-//   --markdown -> start in markdown mode immediately
-//
-// Requirements:
-//   - Node.js >= 18 for native fetch() + streaming reads.
-//   - npm install commander dotenv marked marked-terminal
-//   - .env file optional:
-//       API_KEY=your_openai_api_key
-//       MODEL=gpt-4
-//     or pass --apikey <YOUR_KEY> at runtime
+// Usage:
+//   ./xgpt --apikey YOUR_KEY "Hello"
+//   or set API_KEY in ~/.config/xgpt/xgpt.env
+//   or set --markdown to start in Markdown mode
 //
 
-import dotenv from 'dotenv';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { Command } from 'commander';
 import readline from 'node:readline';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
+import dotenv from 'dotenv';     // <-- static import for dotenv
+import axios from 'axios';       // <-- replaced node-fetch with axios
 
-// -----------------------------------------------------------------------------
-// 1) Load environment variables from .env if present
-// -----------------------------------------------------------------------------
-dotenv.config();
+// ----------------------------------------------------------------------------
+// 1) Load environment variables from ~/.config/xgpt/xgpt.env if it exists
+// ----------------------------------------------------------------------------
+const configDir = path.join(os.homedir(), '.config', 'xgpt');
+const configFile = path.join(configDir, 'xgpt.env');
 
-// -----------------------------------------------------------------------------
+// Use dotenv.config() if the file exists
+if (fs.existsSync(configFile)) {
+  dotenv.config({ path: configFile });
+}
+
+// ----------------------------------------------------------------------------
 // 2) Configure "marked" to render Markdown nicely in the terminal
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 marked.setOptions({
   renderer: new TerminalRenderer()
 });
 
-// -----------------------------------------------------------------------------
-// 3) Set up Commander for CLI
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 3) Set up Commander for CLI arguments
+// ----------------------------------------------------------------------------
 const program = new Command();
 program
   .option('--apikey <apikey>', 'Your OpenAI API key')
@@ -56,28 +59,30 @@ program
 const options = program.opts();
 const initialPrompt = program.args[0];
 
-// -----------------------------------------------------------------------------
-// 4) Retrieve the API key
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 4) Resolve the API key (priority: config file -> env -> CLI -> none)
+// ----------------------------------------------------------------------------
 const apiKey = process.env.API_KEY || options.apikey;
 if (!apiKey) {
-  console.error("Error: No API key provided.\nPlease supply it via .env as 'API_KEY' or via --apikey.");
+  console.error(
+    "Error: No API key provided. Please set API_KEY in ~/.config/xgpt/xgpt.env or pass --apikey."
+  );
   process.exit(1);
 }
 
-// -----------------------------------------------------------------------------
-// 5) Retrieve the model (fallback to gpt-4)
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 5) Resolve the model (fallback to gpt-4 if not specified)
+// ----------------------------------------------------------------------------
 const model = process.env.MODEL || 'gpt-4';
 
-// -----------------------------------------------------------------------------
-// 6) Determine if we start in Markdown mode from the CLI flag
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 6) Determine if we start in Markdown mode from CLI
+// ----------------------------------------------------------------------------
 let isMarkdownMode = !!options.markdown;
 
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 // 7) Create a readline interface for interactive usage
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
@@ -86,138 +91,136 @@ const rl = readline.createInterface({
 // We'll keep the conversation messages in memory
 let messages = [];
 
-// -----------------------------------------------------------------------------
-// Helper: spinner animation for "Loading..." in Markdown mode
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Spinner for "Loading..." in Markdown mode
+// ----------------------------------------------------------------------------
 let spinnerInterval = null;
 function startSpinner() {
   const spinnerChars = ['|', '/', '-', '\\'];
   let i = 0;
-  // We write a spinner every 100ms
   spinnerInterval = setInterval(() => {
     process.stdout.write(`\r${spinnerChars[i++ % spinnerChars.length]} Loading...`);
   }, 100);
 }
+
 function stopSpinner() {
   if (spinnerInterval) {
     clearInterval(spinnerInterval);
     spinnerInterval = null;
-    // Clear the spinner line
-    process.stdout.write('\r');
+    process.stdout.write('\r'); // clear spinner line
   }
 }
 
-// -----------------------------------------------------------------------------
-// Resets the conversation to start a new session (clears messages).
-// Also sets the current mode (markdown or not).
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Helper: reset the conversation for a new session
+// ----------------------------------------------------------------------------
 function resetConversation(markdownMode = false) {
   messages = [];
   isMarkdownMode = markdownMode;
   console.log(`\n--- Started a new session in ${isMarkdownMode ? 'Markdown' : 'Normal'} mode ---\n`);
 }
 
-// -----------------------------------------------------------------------------
-// chatWithGPT (Normal mode, streaming).
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// chatWithGPT: Normal mode (streaming tokens, using axios + Node.js streams)
+// ----------------------------------------------------------------------------
 async function chatWithGPTStream(userPrompt) {
   messages.push({ role: 'user', content: userPrompt });
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
+  // Make a streaming request with axios
+  const response = await axios.post(
+    'https://api.openai.com/v1/chat/completions',
+    {
+      model,
+      messages,
+      stream: true
     },
-    // Enable streaming
-    body: JSON.stringify({ model, messages, stream: true }),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`HTTP Error ${response.status}: ${errText}`);
-  }
-
-  process.stdout.write('\nAssistant: ');
-  let fullMessage = '';
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder('utf-8');
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    const chunk = decoder.decode(value, { stream: true });
-    const lines = chunk.split('\n').filter((line) => line.trim().startsWith('data: '));
-    for (const line of lines) {
-      const jsonStr = line.replace(/^data: /, '');
-      if (jsonStr === '[DONE]') {
-        break;
-      }
-      try {
-        const parsed = JSON.parse(jsonStr);
-        const token = parsed.choices?.[0]?.delta?.content || '';
-        if (token) {
-          process.stdout.write(token);  // print streaming token
-          fullMessage += token;
-        }
-      } catch {
-        // ignore streaming parse errors
-      }
-    }
-  }
-
-  process.stdout.write('\n\n');
-  // Store the assistant's message for context
-  messages.push({ role: 'assistant', content: fullMessage });
-}
-
-// -----------------------------------------------------------------------------
-// chatWithGPT (Markdown mode, no streaming).
-// Shows a spinner while waiting, then prints entire response as Markdown.
-// -----------------------------------------------------------------------------
-async function chatWithGPTMarkdown(userPrompt) {
-  messages.push({ role: 'user', content: userPrompt });
-
-  startSpinner();  // start our spinner animation
-
-  let data;
-  try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
+    {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      // Do NOT use streaming
-      body: JSON.stringify({ model, messages }),
+      responseType: 'stream' // essential for streaming
+    }
+  );
+
+  process.stdout.write('\nAssistant: ');
+  let fullMessage = '';
+
+  // We'll wrap the stream reading in a Promise so we can "await" it
+  await new Promise((resolve, reject) => {
+    response.data.on('data', (chunk) => {
+      const chunkStr = chunk.toString('utf8');
+      // Same logic: look for "data: ..." lines
+      const lines = chunkStr.split('\n').filter((line) => line.trim().startsWith('data: '));
+      for (const line of lines) {
+        const jsonStr = line.replace(/^data: /, '');
+        if (jsonStr === '[DONE]') {
+          // done streaming
+          break;
+        }
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const token = parsed.choices?.[0]?.delta?.content || '';
+          if (token) {
+            process.stdout.write(token);
+            fullMessage += token;
+          }
+        } catch {
+          // ignore parse errors for partial lines
+        }
+      }
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`HTTP Error ${response.status}: ${errText}`);
-    }
+    response.data.on('end', () => {
+      // End of streaming
+      process.stdout.write('\n\n');
+      messages.push({ role: 'assistant', content: fullMessage });
+      resolve();
+    });
 
-    data = await response.json();
+    response.data.on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+// ----------------------------------------------------------------------------
+// chatWithGPT: Markdown mode (non-streaming, spinner-based, simpler axios call)
+// ----------------------------------------------------------------------------
+async function chatWithGPTMarkdown(userPrompt) {
+  messages.push({ role: 'user', content: userPrompt });
+
+  startSpinner(); // spin while we wait
+
+  let data;
+  try {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      { model, messages },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        }
+      }
+    );
+    data = response.data;
   } finally {
-    // Stop spinner whether success or error
     stopSpinner();
   }
 
   const assistantMessage = data.choices[0].message.content;
-
-  // Render as Markdown
   const rendered = marked(assistantMessage);
+
   console.log('Assistant (Markdown):\n');
   console.log(rendered, '\n');
 
-  // Store for context
   messages.push({ role: 'assistant', content: assistantMessage });
 }
 
-// -----------------------------------------------------------------------------
-// Main prompt loop: handle commands (/ns, /nsm, /quit, etc.) or normal input
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Prompt loop: handles user commands (/ns, /nsm, /quit) or normal input
+// ----------------------------------------------------------------------------
 function promptLoop() {
   rl.question('You: ', async (input) => {
     // Empty line => exit
@@ -234,7 +237,6 @@ function promptLoop() {
 
     // /ns => new session in normal mode
     if (input.startsWith('/ns ')) {
-      // If user typed /ns plus a message
       const newSessionMsg = input.slice(3).trim();
       resetConversation(false);
       if (newSessionMsg) {
@@ -245,12 +247,10 @@ function promptLoop() {
         }
       }
     } else if (input.trim() === '/ns') {
-      // plain "/ns" with no message
       resetConversation(false);
 
     // /nsm => new session in markdown mode
     } else if (input.startsWith('/nsm ')) {
-      // if user typed /nsm plus a message
       const newSessionMsg = input.slice(4).trim();
       resetConversation(true);
       if (newSessionMsg) {
@@ -261,11 +261,10 @@ function promptLoop() {
         }
       }
     } else if (input.trim() === '/nsm') {
-      // plain "/nsm" with no message
       resetConversation(true);
 
     } else {
-      // Normal user input => chat in current mode
+      // Normal user message => use current mode
       try {
         if (isMarkdownMode) {
           await chatWithGPTMarkdown(input);
@@ -277,14 +276,14 @@ function promptLoop() {
       }
     }
 
-    // Keep prompting
+    // Loop again
     promptLoop();
   });
 }
 
-// -----------------------------------------------------------------------------
-// Start the CLI
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Start
+// ----------------------------------------------------------------------------
 console.log(`=== ChatGPT CLI (${model}) ===`);
 console.log(`Current mode: ${isMarkdownMode ? 'Markdown' : 'Normal'}\n`);
 console.log(`Commands:
@@ -296,7 +295,6 @@ console.log(`Commands:
 `);
 console.log('Press Enter (empty) or Ctrl+C to exit.\n');
 
-// If there's an initial prompt from the CLI, handle it in the current mode
 (async function main() {
   if (initialPrompt) {
     try {
