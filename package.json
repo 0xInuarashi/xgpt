@@ -24,13 +24,23 @@
   },
   "contributors": [],
   "scripts": {
-    "dev": "",
-    "test": ""
+    "dev": "node index.js",
+    "build": "npx esbuild index.js --bundle --platform=node --outfile=dist/bundle.cjs && npx pkg dist/bundle.cjs --targets node18-linux-x64 --output dist/xgpt && ./dist/xgpt"
   },
   "dependencies": {
+    "axios": "^1.8.4",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
     "marked": "^14.1.4",
     "marked-terminal": "^7.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.1",
+    "pkg": "^5.8.1"
+  },
+  "pkg": {
+    "scripts": [
+      "index.js"
+    ]
   }
 }

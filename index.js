@@ -68,7 +68,7 @@ if (!apiKey) {
 // -----------------------------------------------------------------------------
 // 5) Retrieve the model (fallback to gpt-4)
 // -----------------------------------------------------------------------------
-const model = process.env.MODEL || 'gpt-4';
+const model = process.env.MODEL || 'gpt-4o-mini';
 
 // -----------------------------------------------------------------------------
 // 6) Determine if we start in Markdown mode from the CLI flag
